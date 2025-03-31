@@ -1,4 +1,4 @@
-﻿using MelonLoader;
+using MelonLoader;
 using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
@@ -377,6 +377,8 @@ namespace DoubleJump
 
         public override void OnSceneWasInitialized(int buildIndex, string sceneName)
         {
+            if (sceneName != "Main") return;
+            
             isInitialized = false;
             configSynced = false;
             players.Clear();
@@ -386,15 +388,20 @@ namespace DoubleJump
         private System.Collections.IEnumerator DelayedInit()
         {
             yield return new WaitForSeconds(1.0f); // Increased delay to ensure scene is fully loaded
-            FindAllPlayers();
-            DetermineIfHost();
-            isInitialized = true;
+            if (GameObject.Find("Player") != null) // Only proceed if we're in a valid scene with players
+            {
+                FindAllPlayers();
+                DetermineIfHost();
+                isInitialized = true;
+            }
         }
 
         public override void OnUpdate()
         {
-            if (!isInitialized)
-                return;
+            if (!isInitialized || !isHost) return;
+
+            // Only sync config in Main scene
+            if (UnityEngine.SceneManagement.SceneManager.GetActiveScene().name != "Main") return;
 
             // Periodically search for new players
             if (Time.time - lastPlayerSearchTime > playerSearchInterval)
@@ -404,7 +411,7 @@ namespace DoubleJump
             }
             
             // If we're the host and config syncing is enabled, periodically sync config
-            if (isHost && config.SyncConfig && !configSynced && Time.time - lastConfigSyncTime > CONFIG_SYNC_INTERVAL)
+            if (config.SyncConfig && !configSynced && Time.time - lastConfigSyncTime > CONFIG_SYNC_INTERVAL)
             {
                 SyncConfigToClients();
                 lastConfigSyncTime = Time.time;
