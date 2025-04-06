@@ -15,108 +15,67 @@ namespace DoubleJump
         public float MaxJumpHeight = 10f;
         public bool AllowTripleJump = false;
         public bool SyncConfig = true;
-
-        // Simple JSON serialization
-        public string ToJson()
-        {
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine("{");
-            sb.AppendLine($"  \"JumpForce\": {JumpForce.ToString(System.Globalization.CultureInfo.InvariantCulture)},");
-            sb.AppendLine($"  \"EnableDoubleJump\": {EnableDoubleJump.ToString().ToLower()},");
-            sb.AppendLine($"  \"MaxJumpHeight\": {MaxJumpHeight.ToString(System.Globalization.CultureInfo.InvariantCulture)},");
-            sb.AppendLine($"  \"AllowTripleJump\": {AllowTripleJump.ToString().ToLower()},");
-            sb.AppendLine($"  \"SyncConfig\": {SyncConfig.ToString().ToLower()}");
-            sb.AppendLine("}");
-            return sb.ToString();
-        }
-
-        // Simple JSON deserialization
-        public static ModConfig FromJson(string json)
-        {
-            ModConfig config = new ModConfig();
-
-            try
-            {
-                // Parse float values
-                config.JumpForce = ParseFloatFromJson(json, "JumpForce", config.JumpForce);
-                config.MaxJumpHeight = ParseFloatFromJson(json, "MaxJumpHeight", config.MaxJumpHeight);
-
-                // Parse boolean values
-                config.EnableDoubleJump = ParseBoolFromJson(json, "EnableDoubleJump", config.EnableDoubleJump);
-                config.AllowTripleJump = ParseBoolFromJson(json, "AllowTripleJump", config.AllowTripleJump);
-                config.SyncConfig = ParseBoolFromJson(json, "SyncConfig", config.SyncConfig);
-            }
-            catch (Exception)
-            {
-                // If parsing fails, return default config
-            }
-
-            return config;
-        }
-
-        private static float ParseFloatFromJson(string json, string key, float defaultValue)
-        {
-            string pattern = $"\"{key}\"\\s*:\\s*([0-9.]+)";
-            var match = System.Text.RegularExpressions.Regex.Match(json, pattern);
-            if (match.Success && match.Groups.Count > 1)
-            {
-                if (float.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float result))
-                {
-                    return result;
-                }
-            }
-            return defaultValue;
-        }
-
-        private static bool ParseBoolFromJson(string json, string key, bool defaultValue)
-        {
-            string pattern = $"\"{key}\"\\s*:\\s*(true|false)";
-            var match = System.Text.RegularExpressions.Regex.Match(json, pattern);
-            if (match.Success && match.Groups.Count > 1)
-            {
-                if (bool.TryParse(match.Groups[1].Value, out bool result))
-                {
-                    return result;
-                }
-            }
-            return defaultValue;
-        }
     }
 
     public class Core : MelonMod
     {
-        private static ModConfig config = new ModConfig();
+        // Custom validator class since ValueRange isn't available
+        private class FloatRangeValidator
+        {
+            private float min;
+            private float max;
 
-        // Host gameplay values
+            public FloatRangeValidator(float min, float max)
+            {
+                this.min = min;
+                this.max = max;
+            }
+
+            public float Validate(float value)
+            {
+                return Mathf.Clamp(value, min, max);
+            }
+        }
+
+        private static ModConfig config = new ModConfig();
+        private const string CATEGORY_GENERAL = "DoubleJump";
+        private const string SETTING_JUMP_FORCE = "JumpForce";
+        private const string SETTING_ENABLE_DOUBLE_JUMP = "EnableDoubleJump";
+        private const string SETTING_MAX_JUMP_HEIGHT = "MaxJumpHeight";
+        private const string SETTING_ALLOW_TRIPLE_JUMP = "AllowTripleJump";
+        private const string SETTING_SYNC_CONFIG = "SyncConfig";
+
+        // Host gameplay values (used for syncing)
         private static float hostJumpForce = 7f;
         private static bool hostDoubleJumpEnabled = true;
         private static float hostMaxJumpHeight = 10f;
         private static bool hostTripleJumpAllowed = false;
 
-        // Client gameplay values
-        private static float clientJumpForce = 7f;
-        private static bool clientDoubleJumpEnabled = true;
-        private static float clientMaxJumpHeight = 10f;
-        private static bool clientTripleJumpAllowed = false;
+        // Active gameplay values (used for actual gameplay)
+        private static float activeJumpForce = 7f;
+        private static bool activeDoubleJumpEnabled = true;
+        private static float activeMaxJumpHeight = 10f;
+        private static bool activeTripleJumpAllowed = false;
+
+        // Local config values (never overwritten by sync)
+        private static float localJumpForce = 7f;
+        private static bool localDoubleJumpEnabled = true;
+        private static float localMaxJumpHeight = 10f;
+        private static bool localTripleJumpAllowed = false;
 
         private static bool isInitialized = false;
         private static List<PlayerData> players = new List<PlayerData>();
-        private static float playerSearchInterval = 5f; // Increased to reduce overhead
+        private static float playerSearchInterval = 5f;
         private static float lastPlayerSearchTime = 0f;
         private static CSteamID localSteamID;
-        private static bool debugMode = false; // Set to true for verbose logging
+        private static bool debugMode = false;
         private static bool isHost = false;
         private static bool configSynced = false;
 
         // Network message constants
         private const string CONFIG_MESSAGE_PREFIX = "DJMP_CONFIG:";
-        private const int CONFIG_SYNC_INTERVAL = 10; // Seconds between config sync attempts
+        private const int CONFIG_SYNC_INTERVAL = 10;
         private static float lastConfigSyncTime = 0f;
-
-        // Config file paths
-        private static string CONFIG_DIRECTORY = Path.Combine("UserData", "DoubleJump");
-        private static string CONFIG_FILE = Path.Combine(CONFIG_DIRECTORY, "config.json");
 
         // Class to store per-player data
         private class PlayerData
@@ -133,7 +92,7 @@ namespace DoubleJump
             public Vector3 playerVelocity = Vector3.zero;
             public bool isLocalPlayer = false;
             public CSteamID? steamID = null;
-            public bool isRealPlayer = false; // Flag to indicate if this is likely a real player
+            public bool isRealPlayer = false;
             public bool isHost = false;
 
             public PlayerData(GameObject obj)
@@ -142,16 +101,12 @@ namespace DoubleJump
                 playerController = obj.GetComponent<CharacterController>();
                 playerRigidbody = obj.GetComponent<Rigidbody>();
 
-                // If no rigidbody found, try to find in children
                 if (playerRigidbody == null)
                 {
                     playerRigidbody = obj.GetComponentInChildren<Rigidbody>(true);
                 }
 
-                // Try to find Steam ID component or property
                 TryGetSteamID();
-
-                // Determine if this is likely a real player
                 DetermineIfRealPlayer();
             }
 
@@ -167,9 +122,6 @@ namespace DoubleJump
             {
                 try
                 {
-                    // Try different methods to get Steam ID
-
-                    // Method 1: Check if the object name contains a Steam ID (common format)
                     string name = playerObject.name;
                     if (name.Contains("(") && name.Contains(")"))
                     {
@@ -186,13 +138,11 @@ namespace DoubleJump
                         }
                     }
 
-                    // Method 2: Check for a component that might have SteamID
                     var components = playerObject.GetComponents<Component>();
                     foreach (var component in components)
                     {
                         if (component == null) continue;
 
-                        // Look for properties or fields that might contain SteamID
                         var type = component.GetType();
                         var fields = type.GetFields();
                         foreach (var field in fields)
@@ -208,7 +158,6 @@ namespace DoubleJump
                             }
                         }
 
-                        // Check properties too
                         var properties = type.GetProperties();
                         foreach (var property in properties)
                         {
@@ -233,169 +182,162 @@ namespace DoubleJump
 
             private void DetermineIfRealPlayer()
             {
-                // A real player is likely to have:
-                // 1. A CharacterController or Rigidbody
-                // 2. A Steam ID
-                // 3. A name that suggests it's a player
-                // 4. Active components that suggest player control
-
-                // Check if it has a Steam ID
                 if (steamID.HasValue && steamID.Value.m_SteamID != 0)
                 {
                     isRealPlayer = true;
                     return;
                 }
 
-                // Check if it has a CharacterController and is active
                 if (playerController != null && playerController.enabled && playerObject.activeInHierarchy)
                 {
                     isRealPlayer = true;
                     return;
                 }
 
-                // Check for player-like name but exclude common non-player objects
                 string name = playerObject.name.ToLower();
                 if ((name.Contains("player") || name.Contains("character") || name.Contains("avatar")) &&
-                    !name.Contains("prefab") && !name.Contains("template") && !name.Contains("model") &&
-                    !name.Contains("dummy") && !name.Contains("target") && !name.Contains("screen"))
+                    !name.Contains("prefab") && !name.Contains("template") && !name.Contains("model"))
                 {
-                    // Additional check: must have some movement component
-                    if (playerController != null || playerRigidbody != null)
-                    {
-                        isRealPlayer = true;
-                        return;
-                    }
+                    isRealPlayer = true;
                 }
-
-                // Default: not a real player
-                isRealPlayer = false;
             }
         }
 
-        // MelonPrefs categories and entries
-        private const string CATEGORY_GENERAL = "DoubleJump";
-        private const string SETTING_JUMP_FORCE = "JumpForce";
-        private const string SETTING_ENABLE_DOUBLE_JUMP = "EnableDoubleJump";
-        private const string SETTING_MAX_JUMP_HEIGHT = "MaxJumpHeight";
-        private const string SETTING_ALLOW_TRIPLE_JUMP = "AllowTripleJump";
-        private const string SETTING_SYNC_CONFIG = "SyncConfig";
-
         public override void OnInitializeMelon()
         {
-            // Register MelonPrefs
-            MelonPreferences.CreateCategory(CATEGORY_GENERAL, "Double Jump Settings");
-            MelonPreferences.CreateEntry(CATEGORY_GENERAL, SETTING_JUMP_FORCE, config.JumpForce, "Jump Force");
-            MelonPreferences.CreateEntry(CATEGORY_GENERAL, SETTING_ENABLE_DOUBLE_JUMP, config.EnableDoubleJump, "Enable Double Jump");
-            MelonPreferences.CreateEntry(CATEGORY_GENERAL, SETTING_MAX_JUMP_HEIGHT, config.MaxJumpHeight, "Max Jump Height");
-            MelonPreferences.CreateEntry(CATEGORY_GENERAL, SETTING_ALLOW_TRIPLE_JUMP, config.AllowTripleJump, "Allow Triple Jump");
-            MelonPreferences.CreateEntry(CATEGORY_GENERAL, SETTING_SYNC_CONFIG, config.SyncConfig, "Sync Config (Host Only)");
+            var category = MelonPreferences.CreateCategory(CATEGORY_GENERAL, "Double Jump Settings");
 
-            // Load config from file
+            // Using standard MelonPreferences entries without ValueRange
+            category.CreateEntry(
+                SETTING_JUMP_FORCE,
+                config.JumpForce,
+                "Jump Force",
+                "How much force to apply for double jumps"
+            );
+
+            category.CreateEntry(
+                SETTING_ENABLE_DOUBLE_JUMP,
+                config.EnableDoubleJump,
+                "Enable Double Jump",
+                "Toggle double jump functionality"
+            );
+
+            category.CreateEntry(
+                SETTING_MAX_JUMP_HEIGHT,
+                config.MaxJumpHeight,
+                "Max Jump Height",
+                "Maximum height allowed for jumps"
+            );
+
+            category.CreateEntry(
+                SETTING_ALLOW_TRIPLE_JUMP,
+                config.AllowTripleJump,
+                "Allow Triple Jump",
+                "Enable triple jump capability"
+            );
+
+            category.CreateEntry(
+                SETTING_SYNC_CONFIG,
+                config.SyncConfig,
+                "Sync Config (Host Only)",
+                "When enabled, host's settings will be synced to all clients"
+            );
+
             LoadConfig();
+            UpdateLocalValues();
+            UpdateHostValues();
+            UpdateActiveValues();
+        }
 
-            // Initialize host values from our local config
-            hostJumpForce = config.JumpForce;
-            hostDoubleJumpEnabled = config.EnableDoubleJump;
-            hostMaxJumpHeight = config.MaxJumpHeight;
-            hostTripleJumpAllowed = config.AllowTripleJump;
-
-            // Initialize client values with same defaults
-            clientJumpForce = config.JumpForce;
-            clientDoubleJumpEnabled = config.EnableDoubleJump;
-            clientMaxJumpHeight = config.MaxJumpHeight;
-            clientTripleJumpAllowed = config.AllowTripleJump;
-
-            LoggerInstance.Msg($"DoubleJump mod initialized with jump force: {config.JumpForce}");
-            LoggerInstance.Msg("Config will be automatically synced in multiplayer if you're the host");
-            LoggerInstance.Msg("If you need any help join https://discord.gg/PCawAVnhMH");
-            LoggerInstance.Msg("Happy Selling!");
-
-            // Try to get local player's Steam ID
+        private bool IsInMultiplayer()
+        {
             try
             {
-                localSteamID = SteamUser.GetSteamID();
-            }
-            catch (System.Exception)
-            {
-                // Silent catch
-            }
+                if (!SteamAPI.Init()) return false;
 
-            // Register for Steam callbacks
-            SteamCallbacks.RegisterCallbacks();
+                CSteamID lobbyId = SteamMatchmaking.GetLobbyByIndex(0);
+                int memberCount = SteamMatchmaking.GetNumLobbyMembers(lobbyId);
+                return memberCount > 1; // More than 1 player means multiplayer
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private void LoadConfig()
         {
-            try
-            {
-                // Create directory if it doesn't exist
-                if (!Directory.Exists(CONFIG_DIRECTORY))
-                {
-                    Directory.CreateDirectory(CONFIG_DIRECTORY);
-                }
+            // Add validation when loading values
+            config.JumpForce = Mathf.Clamp(
+                MelonPreferences.GetEntryValue<float>(CATEGORY_GENERAL, SETTING_JUMP_FORCE),
+                1f, 20f
+            );
 
-                // If config file exists, load it
-                if (File.Exists(CONFIG_FILE))
-                {
-                    string json = File.ReadAllText(CONFIG_FILE);
-                    config = ModConfig.FromJson(json);
+            config.EnableDoubleJump = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, SETTING_ENABLE_DOUBLE_JUMP);
 
-                    // Update MelonPrefs to match loaded config
-                    MelonPreferences.SetEntryValue(CATEGORY_GENERAL, SETTING_JUMP_FORCE, config.JumpForce);
-                    MelonPreferences.SetEntryValue(CATEGORY_GENERAL, SETTING_ENABLE_DOUBLE_JUMP, config.EnableDoubleJump);
-                    MelonPreferences.SetEntryValue(CATEGORY_GENERAL, SETTING_MAX_JUMP_HEIGHT, config.MaxJumpHeight);
-                    MelonPreferences.SetEntryValue(CATEGORY_GENERAL, SETTING_ALLOW_TRIPLE_JUMP, config.AllowTripleJump);
-                    MelonPreferences.SetEntryValue(CATEGORY_GENERAL, SETTING_SYNC_CONFIG, config.SyncConfig);
+            config.MaxJumpHeight = Mathf.Clamp(
+                MelonPreferences.GetEntryValue<float>(CATEGORY_GENERAL, SETTING_MAX_JUMP_HEIGHT),
+                1f, 30f
+            );
 
-                    LoggerInstance.Msg("Config loaded from file");
-                }
-                else
-                {
-                    // If no config file exists, create one with default values
-                    config = new ModConfig();
-                    SaveConfig();
-                    LoggerInstance.Msg("Created new config file with default values");
-                }
-            }
-            catch (Exception ex)
-            {
-                LoggerInstance.Error($"Error loading config: {ex.Message}");
-                // Use default config if loading fails
-                config = new ModConfig();
-            }
+            config.AllowTripleJump = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, SETTING_ALLOW_TRIPLE_JUMP);
+            config.SyncConfig = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, SETTING_SYNC_CONFIG);
         }
 
-        private void SaveConfig()
+        private void UpdateLocalValues()
         {
-            try
-            {
-                // Update config from MelonPrefs
-                config.JumpForce = MelonPreferences.GetEntryValue<float>(CATEGORY_GENERAL, SETTING_JUMP_FORCE);
-                config.EnableDoubleJump = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, SETTING_ENABLE_DOUBLE_JUMP);
-                config.MaxJumpHeight = MelonPreferences.GetEntryValue<float>(CATEGORY_GENERAL, SETTING_MAX_JUMP_HEIGHT);
-                config.AllowTripleJump = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, SETTING_ALLOW_TRIPLE_JUMP);
-                config.SyncConfig = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, SETTING_SYNC_CONFIG);
+            localJumpForce = config.JumpForce;
+            localDoubleJumpEnabled = config.EnableDoubleJump;
+            localMaxJumpHeight = config.MaxJumpHeight;
+            localTripleJumpAllowed = config.AllowTripleJump;
+        }
 
-                // Create directory if it doesn't exist
-                if (!Directory.Exists(CONFIG_DIRECTORY))
+        private void UpdateHostValues()
+        {
+            if (isHost)
+            {
+                hostJumpForce = config.JumpForce;
+                hostDoubleJumpEnabled = config.EnableDoubleJump;
+                hostMaxJumpHeight = config.MaxJumpHeight;
+                hostTripleJumpAllowed = config.AllowTripleJump;
+
+                if (config.SyncConfig && IsInMultiplayer())
                 {
-                    Directory.CreateDirectory(CONFIG_DIRECTORY);
+                    SyncConfigToClients();
                 }
-
-                // Save config to file using our custom JSON serializer
-                string json = config.ToJson();
-                File.WriteAllText(CONFIG_FILE, json);
-
-                // Also save MelonPrefs for compatibility
-                MelonPreferences.Save();
-
-                LoggerInstance.Msg("Config saved to file");
-            }
-            catch (Exception ex)
-            {
-                LoggerInstance.Error($"Error saving config: {ex.Message}");
             }
         }
+
+        private void UpdateActiveValues()
+        {
+            // In singleplayer, always use local values
+            if (!IsInMultiplayer())
+            {
+                activeJumpForce = localJumpForce;
+                activeDoubleJumpEnabled = localDoubleJumpEnabled;
+                activeMaxJumpHeight = localMaxJumpHeight;
+                activeTripleJumpAllowed = localTripleJumpAllowed;
+                return;
+            }
+
+            // In multiplayer, respect sync settings
+            if (isHost || !config.SyncConfig)
+            {
+                activeJumpForce = localJumpForce;
+                activeDoubleJumpEnabled = localDoubleJumpEnabled;
+                activeMaxJumpHeight = localMaxJumpHeight;
+                activeTripleJumpAllowed = localTripleJumpAllowed;
+            }
+            else
+            {
+                activeJumpForce = hostJumpForce;
+                activeDoubleJumpEnabled = hostDoubleJumpEnabled;
+                activeMaxJumpHeight = hostMaxJumpHeight;
+                activeTripleJumpAllowed = hostTripleJumpAllowed;
+            }
+        }
+
+
 
         public override void OnSceneWasInitialized(int buildIndex, string sceneName)
         {
@@ -411,12 +353,21 @@ namespace DoubleJump
         {
             yield return new WaitForSeconds(1.0f); // Increased delay to ensure scene is fully loaded
             if (GameObject.Find("Player") != null) // Only proceed if we're in a valid scene with players
-            {
+
                 FindAllPlayers();
-                DetermineIfHost();
-                isInitialized = true;
+            DetermineIfHost();
+            isInitialized = true;
+            try
+            {
+                localSteamID = SteamUser.GetSteamID();
+            }
+            catch (System.Exception)
+            {
+                // Silent catch
             }
         }
+
+
 
         public override void OnUpdate()
         {
@@ -775,41 +726,24 @@ namespace DoubleJump
         {
             try
             {
-                // Try to determine if we're the host
-                // Method 1: Check if we're in a lobby and are the owner
-                if (SteamMatchmaking.GetLobbyOwner(SteamMatchmaking.GetLobbyByIndex(0)).m_SteamID == localSteamID.m_SteamID)
+                if (!IsInMultiplayer())
                 {
                     isHost = true;
-                    LoggerInstance.Msg("You are the host - config sync enabled");
+                    configSynced = true; // No need to sync in singleplayer
+                    LoggerInstance.Msg("Singleplayer mode detected");
                     return;
                 }
 
-                // Method 2: Check for host-specific objects or components in the scene
-                // This is game-specific and would need to be customized
-
-                // Method 3: Check if we're the first player or have a specific name
-                foreach (PlayerData player in players)
-                {
-                    if (player.isLocalPlayer)
-                    {
-                        string name = player.playerObject.name.ToLower();
-                        if (name.Contains("host") || name.Contains("server") || name.Contains("owner"))
-                        {
-                            isHost = true;
-                            player.isHost = true;
-                            LoggerInstance.Msg("You are the host - config sync enabled");
-                            return;
-                        }
-                    }
-                }
-
-                isHost = false;
-                LoggerInstance.Msg("You are a client - waiting for host config");
+                localSteamID = SteamUser.GetSteamID();
+                CSteamID lobbyOwner = SteamMatchmaking.GetLobbyOwner(SteamMatchmaking.GetLobbyByIndex(0));
+                isHost = lobbyOwner.m_SteamID == localSteamID.m_SteamID;
+                LoggerInstance.Msg($"Multiplayer mode - You are {(isHost ? "host" : "client")}");
             }
-            catch (System.Exception)
+            catch (Exception ex)
             {
-                // If we can't determine, assume we're not the host
-                isHost = false;
+                LoggerInstance.Error($"Failed to determine host status: {ex.Message}");
+                isHost = true; // Default to true in case of error
+                configSynced = true;
             }
         }
 
@@ -825,32 +759,31 @@ namespace DoubleJump
         // Config synchronization methods
         private void SyncConfigToClients()
         {
-            if (!isHost || !config.SyncConfig) return;
+            if (!isHost || !config.SyncConfig || !IsInMultiplayer()) return;
 
             try
             {
-                // Only sync the gameplay-affecting values
                 string configData = $"{CONFIG_MESSAGE_PREFIX}{hostJumpForce}|{hostDoubleJumpEnabled}|{hostMaxJumpHeight}|{hostTripleJumpAllowed}";
 
-                // Send to all players in the lobby
                 CSteamID lobbyId = SteamMatchmaking.GetLobbyByIndex(0);
                 int memberCount = SteamMatchmaking.GetNumLobbyMembers(lobbyId);
 
                 for (int i = 0; i < memberCount; i++)
                 {
                     CSteamID memberId = SteamMatchmaking.GetLobbyMemberByIndex(lobbyId, i);
-                    if (memberId.m_SteamID != localSteamID.m_SteamID) // Don't send to self
+                    if (memberId.m_SteamID != localSteamID.m_SteamID)
                     {
-                        SteamNetworking.SendP2PPacket(memberId, Encoding.UTF8.GetBytes(configData), (uint)configData.Length, EP2PSend.k_EP2PSendReliable);
+                        byte[] data = Encoding.UTF8.GetBytes(configData);
+                        SteamNetworking.SendP2PPacket(memberId, data, (uint)data.Length, EP2PSend.k_EP2PSendReliable);
                     }
                 }
 
                 configSynced = true;
-                LoggerInstance.Msg("Jump values synced to all clients");
+                LoggerInstance.Msg("Gameplay values synced to all clients");
             }
             catch (Exception ex)
             {
-                LoggerInstance.Error($"Failed to sync config: {ex.Message}");
+                LoggerInstance.Error($"Error syncing config: {ex.Message}");
             }
         }
 
@@ -925,84 +858,109 @@ namespace DoubleJump
 
                     if (parts.Length >= 4)
                     {
-                        // Only update the client-side gameplay values, never touch our config
-                        clientJumpForce = float.Parse(parts[0]);
-                        clientDoubleJumpEnabled = bool.Parse(parts[1]);
-                        clientMaxJumpHeight = float.Parse(parts[2]);
-                        clientTripleJumpAllowed = bool.Parse(parts[3]);
+                        // Create temporary variables for validation
+                        float newJumpForce;
+                        bool newEnableDoubleJump;
+                        float newMaxJumpHeight;
+                        bool newAllowTripleJump;
 
-                        MelonLogger.Msg($"Received host jump values: force={clientJumpForce}, enabled={clientDoubleJumpEnabled}, " +
-                                       $"maxHeight={clientMaxJumpHeight}, tripleJump={clientTripleJumpAllowed}");
+                        // Validate each value before applying
+                        if (!float.TryParse(parts[0], out newJumpForce) ||
+                            !bool.TryParse(parts[1], out newEnableDoubleJump) ||
+                            !float.TryParse(parts[2], out newMaxJumpHeight) ||
+                            !bool.TryParse(parts[3], out newAllowTripleJump))
+                        {
+                            MelonLogger.Error("Invalid config values received - keeping current config");
+                            return;
+                        }
+
+                        // Additional sanity checks
+                        if (newJumpForce <= 0 || newMaxJumpHeight <= 0)
+                        {
+                            MelonLogger.Error("Invalid jump values received - keeping current config");
+                            return;
+                        }
+
+                        // If all validation passes, apply the new values to runtime config only
+                        config.JumpForce = newJumpForce;
+                        config.EnableDoubleJump = newEnableDoubleJump;
+                        config.MaxJumpHeight = newMaxJumpHeight;
+                        config.AllowTripleJump = newAllowTripleJump;
+
+                        MelonLogger.Msg("Received and applied valid config from host");
                         configSynced = true;
                     }
                 }
-                catch (Exception ex)
+                catch (System.Exception ex)
                 {
-                    MelonLogger.Error($"Failed to process jump values: {ex.Message}");
-                    // On failure, fall back to our local values
-                    clientJumpForce = config.JumpForce;
-                    clientDoubleJumpEnabled = config.EnableDoubleJump;
-                    clientMaxJumpHeight = config.MaxJumpHeight;
-                    clientTripleJumpAllowed = config.AllowTripleJump;
+                    MelonLogger.Error($"Failed to process config message: {ex.Message}");
                 }
             }
         }
-
-        // Handle config changes from the MelonPrefs menu
         public override void OnPreferencesSaved()
         {
             bool configChanged = false;
 
-            // Update config and host values, never client values
-            float newJumpForce = MelonPreferences.GetEntryValue<float>(CATEGORY_GENERAL, "JumpForce");
-            if (newJumpForce != config.JumpForce)
+            // Add validation when saving values
+            float newJumpForce = Mathf.Clamp(
+                MelonPreferences.GetEntryValue<float>(CATEGORY_GENERAL, SETTING_JUMP_FORCE),
+                1f, 20f
+            );
+
+            bool newDoubleJumpEnabled = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, SETTING_ENABLE_DOUBLE_JUMP);
+
+            float newMaxJumpHeight = Mathf.Clamp(
+                MelonPreferences.GetEntryValue<float>(CATEGORY_GENERAL, SETTING_MAX_JUMP_HEIGHT),
+                1f, 30f
+            );
+
+            bool newTripleJumpAllowed = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, SETTING_ALLOW_TRIPLE_JUMP);
+            bool newSyncConfig = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, SETTING_SYNC_CONFIG);
+
+            if (Math.Abs(newJumpForce - config.JumpForce) > 0.01f)
             {
                 config.JumpForce = newJumpForce;
-                hostJumpForce = newJumpForce; // Update host value only
                 configChanged = true;
             }
 
-            bool newDoubleJumpEnabled = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, "EnableDoubleJump");
             if (newDoubleJumpEnabled != config.EnableDoubleJump)
             {
                 config.EnableDoubleJump = newDoubleJumpEnabled;
-                hostDoubleJumpEnabled = newDoubleJumpEnabled; // Update host value only
                 configChanged = true;
             }
 
-            float newMaxJumpHeight = MelonPreferences.GetEntryValue<float>(CATEGORY_GENERAL, "MaxJumpHeight");
-            if (newMaxJumpHeight != config.MaxJumpHeight)
+            if (Math.Abs(newMaxJumpHeight - config.MaxJumpHeight) > 0.01f)
             {
                 config.MaxJumpHeight = newMaxJumpHeight;
-                hostMaxJumpHeight = newMaxJumpHeight; // Update host value only
                 configChanged = true;
             }
 
-            bool newTripleJumpAllowed = MelonPreferences.GetEntryValue<bool>(CATEGORY_GENERAL, "AllowTripleJump");
             if (newTripleJumpAllowed != config.AllowTripleJump)
             {
                 config.AllowTripleJump = newTripleJumpAllowed;
-                hostTripleJumpAllowed = newTripleJumpAllowed; // Update host value only
                 configChanged = true;
             }
+
+            if (newSyncConfig != config.SyncConfig)
+            {
+                config.SyncConfig = newSyncConfig;
+                configChanged = true;
+            }
+
             if (configChanged)
             {
-                SaveConfig();
+                UpdateLocalValues();
+                UpdateHostValues();
+                UpdateActiveValues();
 
-                if (isHost && config.SyncConfig)
+                // Save to MelonPreferences
+                MelonPreferences.Save();
+
+                if (isHost && config.SyncConfig && IsInMultiplayer())
                 {
-                    configSynced = false;
-                    lastConfigSyncTime = 0f; // Force immediate sync
-                    LoggerInstance.Msg("Config changed - will sync to clients");
+                    SyncConfigToClients();
                 }
             }
-        }
-
-        // Handle game quit
-        public override void OnApplicationQuit()
-        {
-            // Save any pending config changes
-            SaveConfig();
         }
     }
 }
